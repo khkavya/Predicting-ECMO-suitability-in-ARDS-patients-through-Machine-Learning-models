@@ -1,0 +1,1567 @@
+---
+title: "Classification analysis of Acute Respiratory Distress Syndrome (ARDS) using preECMO data"
+author: "Kavya K H"
+output:
+  html_document:
+    toc: TRUE
+    toc_float: true
+  pdf_document: 
+      extra_dependencies: ["float"]
+date: "15 June"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy.opts=list(width.cutoff=80),tidy=TRUE)
+```
+
+```{r rlibraries, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+# Load required packages
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(gridExtra)
+library(dplyr)
+library(glmnet)
+library(caret)
+library(naniar)
+library(pROC)
+library(mltools)
+
+# Read dataset
+data <- read_excel("ARDSdata.xlsx")
+```
+
+```{r name, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+
+```
+## Data description
+The dataset contain medical records of 450 patients; a full list of variable description is given below.
+
+```{r variables , echo=FALSE, results='asis'}
+cat(' Table: \\label{tab:variables}Description of Variables:
+  
+| Variable| Description|
+|-----|----------|
+|Pt_ID |Patient ID|
+|Gender| Gender|
+|Age |Age in number of days|
+|Indication |acute lung failure (ALF), viral pneumonia (1), bacterial pneumonia (2), aspiration pneumonitis (3), ARDS Trauma (4), ARDS surgery (5), Chemo (6), Other (7)|
+|ECMO_Survival |Survival indicator|
+|RR|Respiratory rate|
+|Vt |Tidal volume|
+|FiO2 |Inspired fraction of oxygen|
+|Ppeak |Peak airway pressure|
+|Pmean |Mean airway pressure|
+|PEEP |Positive end expiratory pressure|
+|PF |Arterial partial pressure of oxygen|
+|SpO2 |Periperal oxygen saturation|
+|PaCO2 |Arterial partial pressure of carbon dioxide|
+|pH |Arterial pH|
+|BE | Arterial base excess|
+|Lactate |Arterial lactate|
+|NAdose |Noradrenaline dose|
+|MAP |Mean arterial pressure|
+|CK |Creatinine Kinase|
+|CRP |C reactive protein|
+|ATIII |Anti-thrombin III|
+|HB |Haemaglobin|
+|Creatinine, Fibrinogen, Bilirubin, Albumin, | Urea, Ddimer, Leukocytes, Platelets, TNFa, IL6, IL8, siL2|
+|||
+')
+```
+
+# Data Exploration
+
+```{r explore, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+# Remove day1 ECMO columns and convert categorical variables as factors
+preECMO <- data %>% 
+  select(-starts_with("Day1")) %>%
+  mutate(Indication = as.factor(Indication),
+         ECMO_Survival = as.factor(ECMO_Survival),
+         Hospital_Survival = as.factor(Hospital_Survival),
+         Gender = as.factor(Gender),
+         Pt_ID = as.character(Pt_ID))
+
+# check for patient repetitions
+paste("Repetition of patient records in the data: ",length(unique(preECMO$Pt_ID)) != nrow(preECMO))
+
+# View data
+str(preECMO)
+
+# Remove 'PreECMO_' from variables names
+names(preECMO) = gsub(pattern = "PreECMO_", replacement = "", x = names(preECMO))
+
+# Shuffle data
+shuffle_index <- sample(1:nrow(preECMO))
+preECMO <- preECMO[shuffle_index, ]
+
+# View data summary
+summary(preECMO)
+
+# check number of missing values per patient
+preECMO <- preECMO %>%
+  mutate(naPatient = rowSums(is.na(preECMO)))
+
+# save continuous variables into a dataframe
+ndata1 <- preECMO %>%
+  select(-c(Pt_ID, ECMO_Survival, Hospital_Survival, Gender, Indication, naPatient))
+
+# change the names of levels in response variable for clarity
+preECMO$ECMO_Survival = as.factor(ifelse(preECMO$ECMO_Survival == "Y", "Survived", "Died"))
+
+```
+
+## Data Visualisation
+
+### Barplots
+```{r plots1, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE, fig.align = "center"}
+# Barplot for the variable ECMO_Survival
+ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = ..count..)) +
+  geom_bar() +
+  xlab("ECMO Survival") +
+  ylab("Proportion") + ggtitle("Proportion of ECMO survival indicator")
+
+# Barplot for the variable Gender
+ggplot(preECMO, mapping = aes(x = Gender, y = ..count.., fill = ECMO_Survival)) +
+  geom_bar() +
+  xlab("Gender") +
+  ylab("Proportion") + ggtitle("Proportion of Gender")
+
+# Barplot for the variable Indication
+ggplot(preECMO, mapping = aes(x = Indication, y = ..count.., fill = ECMO_Survival)) +
+  geom_bar() +
+  xlab("") +
+  ylab("Proportion")+
+  scale_x_discrete(labels=c("viral pneumonia", "bacterial pneumonia", 
+                            "aspiration pneumonitis", "ARDS Trauma", "ARDS surgery",
+                            "Chemo", "Other")) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Proportion of different disease indicators in the dataset")
+
+# piechart for the variable Indication
+preECMO %>% 
+  ggplot(aes(x = "", fill = Indication)) + 
+  geom_bar(position = "fill", width = 1) + 
+  coord_polar(theta = "y") + 
+  labs( 
+    title = "Disease Indicator proportions",
+    x = "", 
+    y = ""
+  ) + 
+  scale_fill_brewer(palette="Blues")+
+  theme(
+    panel.grid = element_blank(), 
+    axis.ticks = element_blank(), 
+    axis.text.x=element_blank(), 
+    panel.border = element_blank() 
+    ) +
+  facet_grid(. ~ ECMO_Survival)
+
+# preECMO$ECMO_Survival = as.factor(ifelse(preECMO$ECMO_Survival == "Survived", "Y", "N"))
+```
+
+### Boxplots 
+```{r plots2, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE, fig.align = "center"}
+# -----------------------------------------------------------------------------
+# boxplots
+My_Theme = theme(plot.title = element_text(size=11),
+                 axis.text=element_text(size=10),
+                 axis.title=element_text(size=10),
+                 legend.title = element_text(size=10),
+                 legend.text = element_text(size=9))
+
+p1 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = Duration_ECMO)) +
+  geom_boxplot(aes(fill = ECMO_Survival) )+
+  labs(x = "Survival", y = "Duration") + My_Theme
+
+p2 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = RR)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "RR") + My_Theme
+
+p3 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = Vt)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "Vt") + My_Theme
+
+p4 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = FiO2)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "FiO2") + My_Theme
+
+p5 <-  ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = Pmean)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "Pmean") + My_Theme
+
+p6 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = SpO2)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "SpO2") + My_Theme
+
+grid.arrange(p1, p2, p3, p4, p5, p6)
+
+p11 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = PaCO2)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "PaCO2") + My_Theme
+
+p12 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = pH)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "pH") + My_Theme
+
+p13 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = BE)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "BE") + My_Theme
+
+p14 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = Lactate)) +
+  geom_boxplot(aes(fill = ECMO_Survival) )+
+  labs(x = "Survival", y = "Lactate") + My_Theme
+
+p15 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = NAdose)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "NAdose") + My_Theme
+
+p16 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = MAP)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "MAP") + My_Theme
+
+grid.arrange(p11, p12, p13, p14, p15, p16)
+
+p21 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = Creatinine)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "creatinine") + My_Theme
+
+p22 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = CK)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "Ck") + My_Theme
+
+p23 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = Bilirubin)) +
+  geom_boxplot(aes(fill = ECMO_Survival) )+
+  labs(x = "Survival", y = "Bilirubin") + My_Theme
+
+p24 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = CRP)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "CRP") + My_Theme
+
+p25 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = Fibrinogen)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "Fibrinogen") + My_Theme
+
+p26 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = Ddimer)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "Ddimer") + My_Theme
+
+grid.arrange(p21, p22, p23, p24, p25, p26)
+
+p31 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = ATIII)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "ATIII") + My_Theme
+
+p32 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = Leukocytes)) +
+  geom_boxplot(aes(fill = ECMO_Survival) )+
+  labs(x = "Survival", y = "leucocytes") + My_Theme
+
+p33 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = Platelets)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "Platelets") + My_Theme
+
+p34 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = TNFa)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "TNFa") + My_Theme
+
+p35 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = IL6)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "IL6") + My_Theme
+
+p36 <- ggplot(preECMO, mapping = aes(x = ECMO_Survival, y = siIL2)) +
+  geom_boxplot(aes(fill = ECMO_Survival)) +
+  labs(x = "Survival", y = "siIL2") + My_Theme
+
+grid.arrange(p31, p32, p33, p34, p35, p36)
+
+```
+
+# Hypothesis tests 
+
+Initial feature filtering was done using simple hypothesis tests. We used shapiro-wilks test to check normality, and spearman correlation coefficient and pearson correlation coefficient for variable selection.
+
+```{r normalitytest, eval=FALSE, echo=FALSE, warning=FALSE, message=FALSE}
+preECMO_2 <- preECMO
+# Shapiro–Wilk test
+# normality 
+shapiro.test(preECMO$RR)
+shapiro.test(preECMO$Vt)
+shapiro.test(preECMO$CK)
+shapiro.test(preECMO$Bilirubin)
+shapiro.test(preECMO$CRP)
+shapiro.test(preECMO$Fibrinogen)
+shapiro.test(preECMO$Ddimer)
+shapiro.test(preECMO$ATIII)
+shapiro.test(preECMO$TNFa)
+shapiro.test(preECMO$siIL2)
+```
+
+## Correlation 
+```{r plots3, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE, fig.align = "center"}
+# pearson correlation coefficient for continuous data
+corr_pearson <- cor(ndata1, use = "complete.obs")
+# continuous variables correlation plot 
+corrplot(corr_pearson, method = "circle", tl.cex=0.5, tl.col = "black")
+
+# Spearman correlation coefficient for continuous data
+# to use kendall correlation coefficient use 'method="kendall"'
+corr_spearsman <- cor(ndata1, method = "spearman", use = "complete.obs")
+# continuous variables correlation plot
+corrplot(corr_spearsman, method = "circle", tl.cex=0.5, tl.col = "black")
+
+# find highly correlated variables
+w <- which(abs(corr_spearsman)>0.7 & row(corr_spearsman)<col(corr_spearsman), arr.ind=TRUE)
+
+# reconstruct names from positions
+high_cor <- matrix(colnames(corr_spearsman)[w],ncol=2)
+high_cor
+
+# devtools::install_github("laresbernardo/lares")
+library(lares) # library contain tool to display top correlations in the dataset
+
+# Display top 5 highly correlated variables
+corr_cross(ndata1, # name of dataset
+  max_pvalue = 0.05, method = "spearman",# display only significant correlations (at 5% level)
+  top = 5 # display top 5 couples of variables (by correlation coefficient)
+)
+# corr_cross(preECMO, type=2)
+
+# Remove highly correlated variables (only keep one based on the number of missing values) and unused variables
+preECMO <- preECMO %>%
+  select(-c(PEEP, PF, IL8, naPatient, Hospital_Survival, Duration_ECMO))
+
+# Display summary of dataset
+# summary(preECMO)
+
+```
+
+```{r ohet, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+# One hot encoding to binarize the catagorical variable "Indication"
+preECMO <- cbind(preECMO, model.matrix(~Indication - 1, data = preECMO))
+
+# Remove the variable "Indication" from the dataset
+preECMO <- preECMO %>% 
+  select(-c(Indication)) 
+
+# Convert variable types to factors
+preECMO <- preECMO %>%
+  mutate(Indication1 = as.factor(Indication1)) %>%
+  mutate(Indication2 = as.factor(Indication2)) %>%
+  mutate(Indication3 = as.factor(Indication3)) %>%
+  mutate(Indication4 = as.factor(Indication4)) %>%
+  mutate(Indication5 = as.factor(Indication5)) %>%
+  mutate(Indication6 = as.factor(Indication6)) %>%
+  mutate(Indication7 = as.factor(Indication7)) 
+```
+
+```{r chisq, echo=FALSE, eval=FALSE, warning=FALSE, message=FALSE}
+# Chi square test
+chisq.test(preECMO$Indication1,preECMO$ECMO_Survival,correct=F)
+chisq.test(preECMO$Indication2,preECMO$ECMO_Survival,correct=F)
+chisq.test(preECMO$Indication3,preECMO$ECMO_Survival,correct=F)
+chisq.test(preECMO$Indication4,preECMO$ECMO_Survival,correct=F)
+chisq.test(preECMO$Indication5,preECMO$ECMO_Survival,correct=F)
+chisq.test(preECMO$Indication6,preECMO$ECMO_Survival,correct=F)
+chisq.test(preECMO$Indication7,preECMO$ECMO_Survival,correct=F)
+chisq.test(preECMO$Gender,preECMO$ECMO_Survival,correct=F)
+
+```
+
+# Data preprocessing
+## Missing values 
+
+```{r missing value, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+# Save dataset in a new dataframe
+preECMO_original <- preECMO
+
+# Display missing values
+vis_miss(preECMO) # Display position and percentage of missing values in the dataset
+preECMO %>% 
+  gg_miss_var(show_pct = TRUE, facet = ECMO_Survival) # Display percentage of missing values grouped by outcome variable 
+gg_miss_var(preECMO, show_pct = TRUE) # Display percentage of missing values in the dataset
+
+
+# Remove the variable "Albumin" because it contain almost 50% missing values
+preECMO <- preECMO %>% 
+  select(-c(Albumin)) 
+
+# Replace missing values with median (variables with percentage of missing values less than 2%)
+preECMO$Lactate[is.na(preECMO$Lactate)] <- median(preECMO$Lactate, na.rm = TRUE)
+preECMO$Leukocytes[is.na(preECMO$Leukocytes)] <- median(preECMO$Leukocytes, na.rm = TRUE)
+
+
+# replace missing values with random values from the corresponding column (if relatively large % of NAs and the % of missing values in the column between 2 and 4)
+preECMO <- preECMO %>% 
+  mutate(naPatient = rowSums(is.na(preECMO))) %>% # calculate no. of NAs in each row
+  filter(naPatient < 3) %>% # keep only rows in which no. of missing values less than 3
+  drop_na(ATIII) %>% # drop rows that contain NAs for the variable ATIII
+  mutate(CK= ifelse(!is.na(CK),CK, sample(na.omit(preECMO$CK)))) %>%
+  mutate(Bilirubin= ifelse(!is.na(Bilirubin),Bilirubin, sample(na.omit(preECMO$Bilirubin)))) %>%
+  mutate(CRP= ifelse(!is.na(CRP),CRP, sample(na.omit(preECMO$CRP)))) %>%
+  mutate(Ddimer= ifelse(!is.na(Ddimer),Ddimer, sample(na.omit(preECMO$Ddimer)))) %>%
+  mutate(Urea= ifelse(!is.na(Urea),Urea, sample(na.omit(preECMO$Urea)))) %>%
+  mutate(TNFa= ifelse(!is.na(TNFa),TNFa, sample(na.omit(preECMO$TNFa)))) %>%
+  mutate(siIL2= ifelse(!is.na(siIL2),siIL2, sample(na.omit(preECMO$siIL2))))
+
+# Replace remaining NAs with median (variables with percentage of missing values less than 2%)
+preECMO$RR[is.na(preECMO$RR)] <- median(preECMO$RR, na.rm = TRUE)
+preECMO$Vt[is.na(preECMO$Vt)] <- median(preECMO$Vt, na.rm = TRUE)
+preECMO$Ppeak[is.na(preECMO$Ppeak)] <- median(preECMO$Ppeak, na.rm = TRUE)
+preECMO$Pmean[is.na(preECMO$Pmean)] <- median(preECMO$Pmean, na.rm = TRUE)
+preECMO$MAP[is.na(preECMO$MAP)] <- median(preECMO$MAP, na.rm = TRUE)
+preECMO$Fibrinogen[is.na(preECMO$Fibrinogen)] <- median(preECMO$Fibrinogen, na.rm = TRUE)
+
+# Remove unwanted variables
+preECMO <- preECMO %>% 
+  select(-c(Pt_ID, naPatient)) 
+
+# display summary of dataset
+summary(preECMO)
+```
+
+# Data splitting
+```{r lrpp, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+# concert the type of the variable "Gender" to binary
+preECMO$Gender <- as.factor(ifelse(preECMO$Gender =="m",0,1))
+
+# extract continuous variables
+ndata <- preECMO %>%
+  select(-c(Indication1, Indication2, Indication3, Indication4, Indication5, Indication6, Indication7, Gender, ECMO_Survival))
+
+# normalize continuous variables
+scaled <- apply(ndata, 2, scale)
+
+# min-max normalization
+# maxs <- apply(ndata, 2, max)
+# mins <- apply(ndata, 2, min)
+# scaled <- as.data.frame(scale(ndata, center = mins, scale = maxs - mins))
+
+# Append binary variables to normalised dataframe
+normalised_preECMO <- cbind(scaled, preECMO[,c("Indication1", "Indication2", "Indication3", "Indication4", "Indication5", "Indication6", "Indication7", "Gender", "ECMO_Survival")])
+
+# train-test random splitting (80% of data for training and 20% for testing)
+set.seed(123)
+index <- sample(1:nrow(normalised_preECMO),round(0.8*nrow(normalised_preECMO)))
+
+# normalised data splitting
+train_set <- normalised_preECMO[ index,]
+test_set <- normalised_preECMO[-index,]
+
+# Display proportion of outcome variable in train and test set
+prop.table(table(train_set$ECMO_Survival))
+prop.table(table(test_set$ECMO_Survival))
+
+# extract explanatory variable names
+variables_train <- as.character(names(train_set))
+variables_train <- variables_train[variables_train != "ECMO_Survival"]
+
+# construct a formula with extracted variable names
+formula_train <- as.formula(paste("ECMO_Survival", paste(variables_train, collapse=" + "), sep=" ~ "))
+# display formula
+formula_train
+
+# original (unnormalised) data splitting: 80% training data and 20% test data
+train_set_unnormalised <- preECMO[index,]
+test_set_unnormalised <- preECMO[-index,]
+# glimpse(train_set_unnormalised)
+
+# Data splitting for methods that require hyperpameter optimisation: 60% training data, 20% validation set and 20% train set
+n <-  nrow(normalised_preECMO)
+ind1 <- sample(c(1:n),round(n*0.6))
+ind2 <- sample(c(1:n)[-ind1],round(n*0.2))
+ind3 <- setdiff(c(1:n),c(ind1,ind2))
+train.data <- normalised_preECMO[ind1, ]
+valid.data <- normalised_preECMO[ind2, ]
+test.data  <- normalised_preECMO[ind3, ]
+dim(train.data)
+
+# display proportion of outcome variable in each set
+prop.table(table(train.data$ECMO_Survival))
+prop.table(table(valid.data$ECMO_Survival))
+prop.table(table(test.data$ECMO_Survival))
+
+# extract variable names
+variables_train1 <- as.character(names(train.data))
+variables_train1 <- variables_train1[variables_train1 != "ECMO_Survival"]
+
+# numerical variable in the training set
+n_train <- train_set %>%
+  select(-c("Indication1", "Indication2", "Indication3", "Indication4", "Indication5", "Indication6", "Indication7", "Gender", "ECMO_Survival"))
+
+# convert type of variable into integers - validation set
+n_valid_predictors <- valid.data %>%
+  select(-c("ECMO_Survival")) %>%
+  mutate(Indication1 = as.integer(Indication1)-1)%>%
+  mutate(Indication2 = as.integer(Indication2)-1)%>%
+  mutate(Indication3 = as.integer(Indication3)-1)%>%
+  mutate(Indication4 = as.integer(Indication4)-1)%>%
+  mutate(Indication5 = as.integer(Indication5)-1)%>%
+  mutate(Indication6 = as.integer(Indication6)-1)%>%
+  mutate(Indication7 = as.integer(Indication7)-1)%>%
+  mutate(Gender = as.integer(ifelse(valid.data$Gender=='w',1,0)))
+
+# convert type of variable into integers - test set
+n_test_predictors <- test.data %>%
+  select(-c("ECMO_Survival")) %>%
+  mutate(Indication1 = as.integer(Indication1)-1)%>%
+  mutate(Indication2 = as.integer(Indication2)-1)%>%
+  mutate(Indication3 = as.integer(Indication3)-1)%>%
+  mutate(Indication4 = as.integer(Indication4)-1)%>%
+  mutate(Indication5 = as.integer(Indication5)-1)%>%
+  mutate(Indication6 = as.integer(Indication6)-1)%>%
+  mutate(Indication7 = as.integer(Indication7)-1)%>%
+  mutate(Gender = as.integer(ifelse(test.data$Gender=='w',1,0)))
+
+
+
+# data splitting for decision trees: these sets contain missing values
+train_set_tree <- preECMO_original[ index,]
+test_set_tree <- preECMO_original[-index,]
+
+
+```
+
+# Feature selection
+
+## Lasso regression
+
+```{r vslrgn, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+# extract numerical variables
+n_lasso <- normalised_preECMO %>%
+  select(-c("Indication1", "Indication2", "Indication3", "Indication4", "Indication5", "Indication6", "Indication7", "Gender", "ECMO_Survival"))
+# glimpse(n_lasso)
+
+# construct model matrix for binary variables in train set
+xfactors_train_full <- model.matrix(ECMO_Survival ~ Gender + Indication1 + Indication2 + Indication3 + Indication4 + Indication5 + Indication6 + Indication7, data = normalised_preECMO)[, -1]
+
+# predictors matrix (combining numerical and binary variables)
+x_full <- as.matrix(data.frame(n_lasso, xfactors_train_full))
+# response variable (convert to binary)
+y_full <- ifelse(normalised_preECMO$ECMO_Survival == "Survived", 1, 0)
+
+
+# Fit model: alpha=1 for lasso only and can blend with ridge penalty down to
+# alpha=0 ridge only.
+set.seed(123)
+glmmod01 <- glmnet(x_full, y_full, alpha=1, family="binomial")
+
+# Plot variable coefficients vs. shrinkage parameter lambda.
+plot(glmmod01, xvar="lambda")
+# glmmod
+# coef(glmmod01)[, 10]
+
+# Fit cross-validation model
+set.seed(123)
+cv.glmmod01 <- cv.glmnet(x_full, y_full, alpha=1, family="binomial")
+# Plot results
+plot(cv.glmmod01)
+# Print minimum value of lambda
+best_lambda01 <- cv.glmmod01$lambda.min
+# best_lambda01
+
+# Fit model using minimum lambda
+best_model01 <- glmnet(x_full, y_full, alpha = 1, lambda = best_lambda01, family="binomial")
+# print the value of coefficients
+coef(best_model01)
+
+assess.glmnet(best_model01,           #in this case, we are evaluating the model
+              newx = x_full,              #in the same data used to fit the model
+              newy = y_full, family = "binomial" ) 
+
+# Plot selected variables and their coefficients
+coefList <- coef(best_model01, s='lambda.1se')
+coefList <- data.frame(coefList@Dimnames[[1]][coefList@i+1],coefList@x) 
+names(coefList) <- c('var','val') # construct coefficient list
+
+coefList <- coefList %>%
+  arrange(-abs(val)) 
+coefList <- coefList[-1,] # remove intercept
+# coefList
+
+# plot variable importance
+df01 <- data.frame(imp = coefList$val)
+rownames(df01) <- coefList$var
+df02 <- df01 %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(imp) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+ggplot(df02) +
+  geom_segment(aes(x = variable, y = 0, xend = variable, yend = imp), 
+               size = 1.5, alpha = 0.7) +
+  geom_point(aes(x = variable, y = imp, col = variable), 
+             size = 4, show.legend = F) +
+  coord_flip() +
+  theme_bw() + labs(title = "Variable selection by LASSO",
+              x = "Variable", y = "Coefficient")
+
+# save image to device
+# ggsave(
+#   "lassoimp.png",
+#   plot = last_plot(),
+#   device = "png",
+#   path = "~/Downloads",
+#   scale = 0.5,
+#   width = 30,
+#   height = 15,
+#   units = "cm",
+#   dpi = 600,
+#   limitsize = TRUE,
+#   bg = NULL
+# )
+```
+
+
+## Boruta
+
+```{r borutta, eval=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+library(Boruta) # required library
+
+# perform boruta algorrithm on the entire dataset. Maximum number of importance source runs=500
+set.seed(111)
+boruta <- Boruta(formula_train, data = preECMO, doTrace = 2, maxRuns = 500)
+print(boruta) # print results
+
+# attStats(boruta)
+# extract names of confirmed important variable
+variables_boruta_confirmed01 <- rownames(attStats(boruta)[(which(attStats(boruta)$decision=="Confirmed")),]) 
+
+plot(boruta, las = 2, cex.axis = 0.7) # plot results
+plotImpHistory(boruta) # plot history of 500 iterations
+
+# png(file="~/Downloads/boruta1.png",
+#   width = 28,
+#   height = 13,
+#   units = "cm",
+#   res = 600)
+# plot(boruta, las = 2, cex.axis = 0.7) # plot results
+# # a function call to save the file
+# dev.off()
+# 
+# png(file="~/Downloads/boruta2.png",
+#   width = 28,
+#   height = 13,
+#   units = "cm",
+#   res = 600)
+# plotImpHistory(boruta) # plot history of 500 iterations
+# dev.off()
+
+# bor <- TentativeRoughFix(boruta)
+# print(bor)
+
+# get formula using variables selected by boruta
+rf_formula_boruta <- getNonRejectedFormula(boruta) # formula with non rejected variables
+rf_borota_confirmed <- getConfirmedFormula(boruta) # formula with confirmed important variables
+```
+
+# Prediction
+## Logistic regression
+
+```{r vs1, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+# fit a logistic regression model with all the variables in the dataset
+set.seed(123)
+glm1 <- glm(formula=ECMO_Survival~., data=train_set_unnormalised, family = binomial)
+summary(glm1) # model summary
+
+# generate predictions on test set
+glm1_predictions <- predict(glm1, test_set_unnormalised, type="response", family="binomial")
+# convert generated prediction to binary 
+predicted_classes_glm1 <- ifelse(glm1_predictions > 0.5, "Survived", "Died")
+
+# create confusion matrix
+cmatrix_glm1 <- confusionMatrix(data= as.factor(predicted_classes_glm1), reference = as.factor(test_set_unnormalised$ECMO_Survival), dnn = c("Prediction", "Original"))
+cmatrix_glm1
+#Display results
+cmatrix_glm1$byClass
+
+mcc_glm1 <- mcc(as.factor(test_set_unnormalised$ECMO_Survival), as.factor(predicted_classes_glm1))
+mcc_glm1 # compute MCC
+accuracy_glm1 <- cmatrix_glm1$overall['Accuracy']   
+accuracy_glm1 # Accuracy of the model
+f1_glm1 <- cmatrix_glm1$byClass['F1']   
+f1_glm1 # F1 score of the model
+
+# extract variables selected by Lasso regression
+toselect.x0 <- coefList$var
+toselect.x0 = gsub(pattern = "1", replacement = "", x = toselect.x0) # rename
+
+# change entry type to character
+relevant.x0 <- as.character((toselect.x0))
+# relevant.x0
+
+# construct formula with only sig variables
+sig.formula0 <- as.formula(paste("ECMO_Survival", paste(relevant.x0, collapse=" + "), sep=" ~ "))
+
+# fit logistic regression model with variable selected by Lasso
+set.seed(123)
+sig.model0 <- glm(formula=sig.formula0, data=train_set_unnormalised, family = binomial)
+summary(sig.model0)
+
+# generate predictions
+glm_predictions <- predict(sig.model0, test_set_unnormalised, type="response", family="binomial")
+# convert generated prediction to binary
+predicted_classes_glm <- ifelse(glm_predictions > 0.5, "Survived", "Died")
+
+# create confusion matrix
+cmatrix_glm <- confusionMatrix(data= as.factor(predicted_classes_glm), reference = as.factor(test_set_unnormalised$ECMO_Survival),
+                           dnn = c("Prediction", "Original"))
+cmatrix_glm
+#Display results
+cmatrix_glm$byClass
+
+mcc_glm <- mcc(as.factor(test_set_unnormalised$ECMO_Survival), as.factor(predicted_classes_glm))
+mcc_glm # Calculate MCC
+accuracy_glm <- cmatrix_glm$overall['Accuracy']   
+accuracy_glm # Accuracy of the model
+f1_glm <- cmatrix_glm$byClass['F1']   
+f1_glm # F1 score of the model
+```
+
+## Decision trees
+
+```{r dtree, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+# load required libraries
+library(rpart)
+library(rpart.plot)
+
+# build first decision tree
+set.seed(123)
+first_tree <- rpart(formula_train, data=train_set_tree, method="class")
+rpart.plot(first_tree,type=2, extra=106, main="First tree") # plot the tree
+
+# create a plot showing variable importance
+df01 <- data.frame(imp = first_tree$variable.importance)
+df02 <- df01 %>% 
+  tibble::rownames_to_column() %>% 
+  dplyr::rename("variable" = rowname) %>% 
+  dplyr::arrange(imp) %>%
+  dplyr::mutate(variable = forcats::fct_inorder(variable))
+ggplot(df02) +
+  geom_segment(aes(x = variable, y = 0, xend = variable, yend = imp), 
+               size = 1.5, alpha = 0.7) +
+  geom_point(aes(x = variable, y = imp, col = variable), 
+             size = 4, show.legend = F) +
+  coord_flip() +
+  theme_bw()
+
+printcp(first_tree) # print cp of the first tree
+
+cp.select <- function(big.tree) {
+  min.x <- which.min(big.tree$cptable[, 4]) #column 4 is xerror
+  big.tree$cptable[min.x, 1]
+}
+
+# prune first tree
+first_tree_pruned <- prune(first_tree, cp=cp.select(first_tree)+0.001)
+rpart.plot(first_tree_pruned, extra=106, main="Pruned tree") # plot the tree
+
+cp.select(first_tree)
+
+# function for accuracy tune
+accuracy_tune <- function(fit) {
+    predict_unseen <- predict(fit, test_set_tree, type = 'class')
+    table_mat <- table(test_set_tree$ECMO_Survival, predict_unseen)
+    accuracy_Test <- sum(diag(table_mat)) / sum(table_mat)
+    return(accuracy_Test)
+}
+
+paste("Accuracy of first tree: ", accuracy_tune(first_tree))
+paste("Accuracy of pruned tree: ", accuracy_tune(first_tree_pruned))
+
+# settings for tuning the tree
+control <- rpart.control(minsplit = 4,
+    minbucket = round(5 / 3),
+    maxdepth = 3,
+    cp = cp.select(first_tree)+0.001)
+
+# build a tree using control values
+tune_fit <- rpart(formula_train, data = train_set_tree, method = 'class', control = control)
+print(paste('Accuracy for tuned fit: ',accuracy_tune(tune_fit)))
+
+# generate predictions
+tree_prediction <- predict(first_tree_pruned, newdata=test_set_tree, type="class")
+
+# calculate classification rate
+overall_class_rate_tree <- mean(tree_prediction==test_set_tree$ECMOSurvival)
+
+#Create confusion matrix
+cmatrix_tree <- confusionMatrix(data=as.factor(tree_prediction), reference = as.factor(test_set_tree$ECMO_Survival),  dnn = c("Prediction", "Original"))
+cmatrix_tree
+#Display results 
+cmatrix_tree$byClass
+
+mcc_tree_full <- mcc(as.factor(test_set_tree$ECMO_Survival), as.factor(tree_prediction))
+mcc_tree_full # calculate MCC
+library(MLmetrics)
+f1_tree_full <- F1_Score(as.factor(test_set_tree$ECMO_Survival), as.factor(tree_prediction))
+f1_tree_full # F1 score
+accuracy_tree_full <- cmatrix_tree$overall['Accuracy']   
+accuracy_tree_full # accuracy
+
+# build decision tree using variables selected by boruta
+set.seed(123)
+boruta_dtree <- rpart(rf_borota_confirmed, data=train_set_tree, method="class")
+rpart.plot(first_tree,type=2,extra=106, main="Boruta tree") # plot the tree
+paste("Accuracy of boruta tree: ",accuracy_tune(boruta_dtree)) # accuracy
+
+# generate predictions
+tree_predictionB <- predict(boruta_dtree, newdata=test_set_tree, type="class")
+# calculate classification rate
+overall_class_rate_treeB <- mean(tree_predictionB==test_set_tree$ECMOSurvival)
+
+#Create confusion matrix
+cmatrix_treeB <- confusionMatrix(data=as.factor(tree_predictionB), reference = as.factor(test_set_tree$ECMO_Survival),
+                           dnn = c("Prediction", "Original"))
+cmatrix_treeB
+#Display results 
+cmatrix_treeB$byClass
+
+mcc_btree <- mcc(as.factor(test_set_tree$ECMO_Survival), as.factor(tree_predictionB))
+mcc_btree # calculate MCC
+accuracy_btree <- cmatrix_treeB$overall['Accuracy']   
+accuracy_btree # accuracy
+f1_btree <- cmatrix_treeB$byClass['F1']   
+f1_btree # f1 score
+
+```
+
+## Random forest
+
+```{r rforest, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+# load required libraries
+library(randomForest)
+library(forcats)
+
+# build a random forest using all the variables in the dataset
+set.seed(123)
+rf_train <-  randomForest(formula_train, data=train_set, ntree = 500) # no. of trees=500
+rf_train
+
+# generate predictions 
+predictions_randomF <- predict(rf_train, test_set, "class")
+
+#Create confusion matrix
+cmatrix_rf <- confusionMatrix(data=as.factor(predictions_randomF), reference = as.factor(test_set$ECMO_Survival),dnn = c("Prediction", "Original"))
+cmatrix_rf
+cmatrix_rf$byClass
+
+mcc_rf <- mcc(as.factor(test_set$ECMO_Survival), as.factor(predictions_randomF))
+mcc_rf # calculate MCC
+accuracy_rf <- cmatrix_rf$overall['Accuracy']   
+accuracy_rf # accuracy
+f1_rf <- cmatrix_rf$byClass['F1']   
+f1_rf # f1 score
+
+# build a random forest using variables selected by boruta
+set.seed(123)
+rfboruta_c <-  randomForest(rf_borota_confirmed, data=train_set, ntree = 500)
+rfboruta_c
+
+# generate predictions
+predictions_randomF_borutaC <- predict(rfboruta_c, test_set, "class")
+
+# create confusion matrix
+cmatrix_rfc <- confusionMatrix(predictions_randomF_borutaC, test_set$ECMO_Survival)
+cmatrix_rfc
+cmatrix_rfc$byClass
+
+mcc_rfb <- mcc(as.factor(test_set$ECMO_Survival), as.factor(predictions_randomF_borutaC))
+mcc_rfb # calculate MCC
+accuracy_rfb <- cmatrix_rfc$overall['Accuracy']   
+accuracy_rfb # accuracy
+f1_rfb <- cmatrix_rfc$byClass['F1']   
+f1_rfb # f1 score
+```
+
+## Neural network
+
+```{r nn1, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+# Load required packages
+library(neuralnet)
+library(NeuralNetTools)
+library(nnet)
+library(tibble)
+
+# construct a formula for implementing neural networks
+formula_nn <- as.formula(paste(" ", paste(variables_train1, collapse=" + "), sep=" ~ "))
+# create model matrix
+nn_matrix <- model.matrix(formula_nn, data=train.data)[,-1]
+# head(nn_matrix,4)              
+# Construct predictor list
+predictor_list <- paste(colnames(nn_matrix),collapse="+")
+
+# symbolic description of the model we want to fit
+f <- paste(c("train.data$ECMO_Survival~",predictor_list),collapse="")
+
+
+# convert the variable ECMO_Survival into integer
+train.data$ECMO_Survival <- as.integer(train.data$ECMO_Survival)-1
+valid.data$ECMO_Survival <- as.integer(valid.data$ECMO_Survival)-1
+test.data$ECMO_Survival <- as.integer(test.data$ECMO_Survival)-1
+# glimpse(train.data)
+
+# train neural networks, generate prediction results using validation set and calculate MCC of each model. learning rate of all the networks set to 0.01.
+set.seed(123)
+nn_first <- neuralnet(f,data=nn_matrix, hidden=c(5), learningrate=0.01,
+linear.output=FALSE, err.fct='ce', likelihood=TRUE) # one hidden layer with 5 nodes
+pr.nn1 <- compute(nn_first, n_valid_predictors) # generate prediction on validation set
+predictions_test1 <- ifelse(pr.nn1$net.result<0.5,0,1)
+mcc_nn1 <- mcc(as.factor(valid.data$ECMO_Survival), as.factor(predictions_test1)) # calculate MCC
+
+set.seed(123)
+nn_second <- neuralnet(f,data=nn_matrix, hidden=c(10), learningrate=0.01,
+linear.output=FALSE, err.fct='ce', likelihood=TRUE) # one hidden layer with 10 nodes
+pr.nn2 <- compute(nn_second, n_valid_predictors) # generate prediction on validation set
+predictions_test2 <- ifelse(pr.nn2$net.result<0.5,0,1)
+mcc_nn2 <- mcc(as.factor(valid.data$ECMO_Survival), as.factor(predictions_test2)) # calculate MCC
+
+set.seed(123)
+nn_two_layers_1 <- neuralnet(f,data=nn_matrix, hidden=c(10,5), learningrate=0.01,
+linear.output=FALSE, err.fct='ce', likelihood=TRUE) # two hidden layer with 10 nodes in first layer and 5 nodes in the second
+pr.nn3 <- compute(nn_two_layers_1, n_valid_predictors) # generate prediction on validation set
+predictions_test3 <- ifelse(pr.nn3$net.result<0.5,0,1)
+mcc_nn3 <- mcc(as.factor(valid.data$ECMO_Survival), as.factor(predictions_test3)) # calculate MCC
+
+set.seed(123)
+nn_two_layers_2 <- neuralnet(f,data=nn_matrix, hidden=c(10,75), learningrate=0.01,
+linear.output=FALSE, err.fct='ce', likelihood=TRUE) # two hidden layer with 10 nodes in first layer and 75 nodes in the second
+pr.nn4 <- compute(nn_two_layers_2, n_valid_predictors) # generate prediction on validation set
+predictions_test4 <- ifelse(pr.nn4$net.result<0.5,0,1)
+mcc_nn4 <- mcc(as.factor(valid.data$ECMO_Survival), as.factor(predictions_test4)) # calculate MCC
+
+# create a dataframe with the name of neural network and their coresponding MCC value
+nn_df <- data.frame (network  = c("nn_first", "nn_second", "nn_two_layers_1", "nn_two_layers_2"),
+                  mcc = c(mcc_nn1, mcc_nn2, mcc_nn3, mcc_nn4))
+nn_df
+
+# function to selectt the model with highest MCC value
+nn.select <- function(nn_level) {
+  min.x <- which.max(nn_level$mcc) #column 4 is xerror
+  nn_level[min.x, 1]
+}
+
+nn_chosen <- get(nn.select(nn_df)) # choose the model with highest MCC value
+paste("Chosen model:", nn.select(nn_df))
+
+# generate predictions using the selected model applied to test set
+pr.nn <- compute(nn_chosen, n_test_predictors)
+predictions_test <- ifelse(pr.nn$net.result<0.5,0,1)
+
+#Create confusion matrix
+cmatrix_nn <- confusionMatrix(data=as.factor(predictions_test), reference = as.factor(test.data$ECMO_Survival),dnn = c("Prediction", "Original"))
+cmatrix_nn
+cmatrix_nn$byClass
+
+mcc_nn <- mcc(as.factor(test.data$ECMO_Survival), as.factor(predictions_test))
+mcc_nn # calculate MCC
+accuracy_nn <- cmatrix_nn$overall['Accuracy']   
+accuracy_nn # accuracy
+f1_nn <- cmatrix_nn$byClass['F1']   
+f1_nn # F1 score
+
+```
+
+## Naive Bayes
+
+```{r nb, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+library(e1071) # load required packages
+
+# build a naive Bayes classifier using all the variables in the dataset
+set.seed(123)  # Setting Seed
+classifier_nb <- naiveBayes(formula_train, data = train_set)
+classifier_nb
+
+# Predicting on test data'
+y_pred <- predict(classifier_nb, newdata = test_set, type="class")
+
+# Confusion Matrix
+cm <- table(test_set$ECMO_Survival, y_pred)
+cm
+ 
+# Model Evaluation
+cmatrix_nb <- confusionMatrix(cm)
+cmatrix_nb
+cmatrix_nb$byClass
+
+mcc_nb <- mcc(as.factor(test_set$ECMO_Survival), as.factor(y_pred))
+mcc_nb # calculate MCC
+accuracy_nb <- cmatrix_nb$overall['Accuracy']   
+accuracy_nb # accuracy
+f1_nb <- cmatrix_nb$byClass['F1']   
+f1_nb # f1 score
+
+# build a second naive Bayes using only the variables selected by Lasso
+set.seed(123)  # Setting Seed
+classifier_nb2 <- naiveBayes(sig.formula0, data = train_set)
+classifier_nb2
+
+# Predicting on test data'
+y_pred2 <- predict(classifier_nb2, newdata = test_set, type="class")
+
+# Confusion Matrix
+cm2 <- table(test_set$ECMO_Survival, y_pred)
+cm2
+ 
+# Model Evaluation
+cmatrix_nb2 <- confusionMatrix(cm2)
+cmatrix_nb2
+cmatrix_nb2$byClass
+
+mcc_nb2 <- mcc(as.factor(test_set$ECMO_Survival), as.factor(y_pred2))
+mcc_nb2 # calculate MCC
+accuracy_nb2 <- cmatrix_nb2$overall['Accuracy']   
+accuracy_nb2 # accuracy
+f1_nb2 <- cmatrix_nb2$byClass['F1']   
+f1_nb2 # f1 score
+
+```
+
+## Gradient boosting
+
+```{r boost, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+library(xgboost) # load required packages
+
+# convert response variable to binary
+train_set_unnormalised$ECMO_Survival <- ifelse(train_set_unnormalised$ECMO_Survival=="Survived",1,0)
+test_set_unnormalised$ECMO_Survival <- ifelse(test_set_unnormalised$ECMO_Survival=="Survived",1,0)
+
+# prepare training data (convert to a data matrix)
+train_data_xg <- data.matrix(train_set_unnormalised %>% select(-c("ECMO_Survival")))
+train_labels_xg <- train_set_unnormalised$ECMO_Survival # train data labels
+dtrain <- xgb.DMatrix(data = train_data_xg, label= train_labels_xg)
+
+# prepare testing data (convert to a data matrix)
+test_data_xg <- data.matrix(test_set_unnormalised %>% select(-c("ECMO_Survival")))
+test_labels_xg <- test_set_unnormalised$ECMO_Survival # test data labels
+dtest <- xgb.DMatrix(data = test_data_xg, label= test_labels_xg)
+
+# define negative case and positive case
+negative_cases <- sum(train_labels_xg == 1)
+postive_cases <- sum(train_labels_xg == 0)
+
+# fit gradient boosted model
+set.seed(123)
+modelxg <- xgboost(data = dtrain, # the data  
+                 nround = 2, # max number of boosting iterations
+                 max.depth = 4, # the maximum depth of each decision tree
+                 objective = "binary:logistic",  # the objective function
+                 scale_pos_weight = negative_cases/postive_cases) # control for imbalanced classes
+
+# get information on how important each feature is
+importance_matrixxg <- xgb.importance(names(train_set_unnormalised %>% select(-c("ECMO_Survival"))), model = modelxg)
+
+# plot it
+xgb.plot.importance(importance_matrixxg)
+
+# generate predictions
+predxg <- predict(modelxg, dtest)
+# get & print the classification error
+err <- mean(as.numeric(predxg > 0.5) != test_labels_xg)
+print(paste("test-error=", err))
+
+# Create confusion Matrix
+cmxg <- table(as.factor(test_labels_xg), as.factor(ifelse(predxg<0.5,0,1)))
+cmxg
+ 
+# Model Evaluation
+cmatrix_xg <- confusionMatrix(cmxg)
+cmatrix_xg
+cmatrix_xg$byClass
+
+mcc_xg <- mcc(as.factor(test_labels_xg), as.factor(ifelse(predxg<0.5,0,1)))
+mcc_xg # calculate MCC
+accuracy_xg <- cmatrix_xg$overall['Accuracy']   
+accuracy_xg # accuracy
+f1_xg <- cmatrix_xg$byClass['F1']   
+f1_xg # f1 score
+
+```
+
+```{r metricPlot, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+### plot MCC, F1 score and accuracy of all the above models
+
+# create a dataframe with variable names and their corresponding values of metrics
+metric_all <- tibble(Model = rep(c("GLM", "GLM lasso", "DT", "DT boruta", "RF", "RF boruta", "NN", "NB", "NB lasso", "XGboost"), each = 3),
+Metric = rep(c("MCC", "F1", "Accuracy"), time = 10),
+Value = c(mcc_glm1, f1_glm1, accuracy_glm1, mcc_glm, f1_glm, accuracy_glm, mcc_tree_full, f1_tree_full, accuracy_tree_full, mcc_btree, f1_btree, accuracy_btree,
+        mcc_rf, f1_rf, accuracy_rf, mcc_rfb, f1_rfb, accuracy_rfb,
+        mcc_nn, f1_nn, accuracy_nn, mcc_nb, f1_nb, accuracy_nb,mcc_nb2, f1_nb2, accuracy_nb2,
+        mcc_xg, f1_xg, accuracy_xg))
+metric_all
+
+# plot the data
+metric_plot <- metric_all %>%
+ggplot(aes(Model, Value, fill = Metric)) +
+geom_col(position = "dodge")
+metric_plot
+
+
+# ggsave(
+#   "metricplot1.png",
+#   plot = last_plot(),
+#   device = "png",
+#   path = "~/Downloads",
+#   scale = 0.5,
+#   width = 40,
+#   height = 15,
+#   units = "cm",
+#   dpi = 600,
+#   limitsize = TRUE,
+#   bg = NULL
+# )
+```
+
+# Under sampling
+
+```{r underSampling, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+library(ROSE) # load required packages
+table(preECMO$ECMO_Survival) # display proportion of outcome variable in imbalanced dataset
+
+# sample data: new balanced dataset contain all the instances in minority class 
+sampled_data <- ovun.sample(ECMO_Survival ~ ., data = preECMO, method = "under", p=0.5, seed = 123)$data
+
+table(sampled_data$ECMO_Survival) # display proportion of outcome variable in undersampled dataset
+
+# train-test random splitting (80% of data for training and 20% for testing)
+set.seed(123)
+index2 <- sample(1:nrow(sampled_data),round(0.8*nrow(sampled_data)))
+
+# normalised data splitting
+train_set_sampled <- sampled_data[ index2,]
+test_set_sampled <- sampled_data[-index2,]
+
+glimpse(train_set_sampled)
+# check proportion of survival indicator in train and test set
+prop.table(table(train_set_sampled$ECMO_Survival))
+prop.table(table(test_set_sampled$ECMO_Survival))
+
+ndata_sampled <- sampled_data %>%
+  select(-c(Indication1, Indication2, Indication3, Indication4, Indication5, Indication6, Indication7, Gender, ECMO_Survival))
+
+# normalize continuous variables
+scaled_sampled <- apply(ndata_sampled, 2, scale)
+
+# normalised dataframe
+normalised_sampled <- cbind(scaled_sampled, sampled_data[,c("Indication1", "Indication2", "Indication3", "Indication4", "Indication5", "Indication6", "Indication7", "Gender", "ECMO_Survival")])
+
+# normalised data splitting
+train_set_sampled_normalised <- normalised_sampled[ index2,]
+test_set_sampled_normalised <- normalised_sampled[-index2,]
+
+# data splitting for neural networks (60% train , 20 % validation and 20% test)
+n_s <-  nrow(normalised_sampled)
+ind1s <- sample(c(1:n_s),round(n_s*0.6))
+ind2s <- sample(c(1:n_s)[-ind1],round(n_s*0.2))
+ind3s <- setdiff(c(1:n_s),c(ind1,ind2))
+train.data_sampled <- normalised_sampled[ind1s, ]
+valid.data_sampled <- normalised_sampled[ind2s, ]
+test.data_sampled  <- normalised_sampled[ind3s, ]
+
+# proportion of response variable in train, valid and test set
+prop.table(table(train.data_sampled$ECMO_Survival))
+prop.table(table(valid.data_sampled$ECMO_Survival))
+prop.table(table(test.data_sampled$ECMO_Survival))
+
+# convert type of variable into integers - train set
+train.data_sampled <- train.data_sampled %>%
+  mutate(Indication1 = as.integer(Indication1)-1)%>%
+  mutate(Indication2 = as.integer(Indication2)-1)%>%
+  mutate(Indication3 = as.integer(Indication3)-1)%>%
+  mutate(Indication4 = as.integer(Indication4)-1)%>%
+  mutate(Indication5 = as.integer(Indication5)-1)%>%
+  mutate(Indication6 = as.integer(Indication6)-1)%>%
+  mutate(Indication7 = as.integer(Indication7)-1)%>%
+  mutate(Gender = as.integer(ifelse(train.data_sampled$Gender=='w',1,0)))
+
+# convert type of variable into integers - validation set predictors
+n_valid_predictors_sampled <- valid.data_sampled %>%
+  select(-c("ECMO_Survival")) %>%
+  mutate(Indication1 = as.integer(Indication1)-1)%>%
+  mutate(Indication2 = as.integer(Indication2)-1)%>%
+  mutate(Indication3 = as.integer(Indication3)-1)%>%
+  mutate(Indication4 = as.integer(Indication4)-1)%>%
+  mutate(Indication5 = as.integer(Indication5)-1)%>%
+  mutate(Indication6 = as.integer(Indication6)-1)%>%
+  mutate(Indication7 = as.integer(Indication7)-1)%>%
+  mutate(Gender = as.integer(ifelse(valid.data_sampled$Gender=='w',1,0)))
+
+# convert type of variable into integers - test set predictors
+n_test_predictors_sampled <- test.data_sampled %>%
+  select(-c("ECMO_Survival")) %>%
+  mutate(Indication1 = as.integer(Indication1)-1)%>%
+  mutate(Indication2 = as.integer(Indication2)-1)%>%
+  mutate(Indication3 = as.integer(Indication3)-1)%>%
+  mutate(Indication4 = as.integer(Indication4)-1)%>%
+  mutate(Indication5 = as.integer(Indication5)-1)%>%
+  mutate(Indication6 = as.integer(Indication6)-1)%>%
+  mutate(Indication7 = as.integer(Indication7)-1)%>%
+  mutate(Gender = as.integer(ifelse(test.data_sampled$Gender=='w',1,0)))
+```
+
+
+
+## Prediction
+
+## Logistic regression
+
+```{r glms, echo=FALSE, eval=TRUE, warning=FALSE, message=FALSE}
+# convert response variable in the train and test set to binary
+train_set_sampled$ECMO_Survival <- ifelse(train_set_sampled$ECMO_Survival=="Survived",1,0)
+test_set_sampled$ECMO_Survival <- ifelse(test_set_sampled$ECMO_Survival=="Survived",1,0)
+
+# View dataset
+# glimpse(train_set_sampled)
+
+# fit model
+set.seed(123)
+glm_us <- glm(formula_train, data=train_set_sampled, family = binomial)
+summary(glm_us) # print summary
+
+# Generate predictions
+glm_us_predictions <- predict(glm_us, test_set_sampled, type="response", family="binomial")
+
+# Convert generated probability to binary response
+predicted_classes_glm_us <- ifelse(glm_us_predictions > 0.5, 1, 0)
+
+# create confusion matrix
+cmatrix_glm_us <- confusionMatrix(data= as.factor(predicted_classes_glm_us), reference = as.factor(test_set_sampled$ECMO_Survival), dnn = c("Prediction", "Original"))
+cmatrix_glm_us
+#Display results
+cmatrix_glm_us$byClass
+
+mcc_glm_us <- mcc(as.factor(test_set_sampled$ECMO_Survival), as.factor(predicted_classes_glm_us))
+mcc_glm_us # calculate MCC
+accuracy_glm_us <- cmatrix_glm_us$overall['Accuracy']   
+accuracy_glm_us # accuracy
+f1_glm_us <- cmatrix_glm_us$byClass['F1']   
+f1_glm_us # f1 score
+
+
+# fit model using lasso-selected variables
+set.seed(123)
+glm_us2 <- glm(formula=sig.formula0, data=train_set_sampled, family = binomial)
+summary(glm_us2) # print model summary
+
+# Generate predictions
+glm_us2_predictions <- predict(glm_us2, test_set_sampled, type="response", family="binomial")
+# Convert generated probability to binary response
+predicted_classes_glm_us2 <- ifelse(glm_us2_predictions > 0.5, 1, 0)
+
+# create confusion matrix
+cmatrix_glm_us2 <- confusionMatrix(data= as.factor(predicted_classes_glm_us2), reference = as.factor(test_set_sampled$ECMO_Survival),
+                           dnn = c("Prediction", "Original"))
+cmatrix_glm_us2
+#Display results
+cmatrix_glm_us2$byClass
+
+mcc_glm_us2 <- mcc(as.factor(test_set_sampled$ECMO_Survival), as.factor(predicted_classes_glm_us2))
+mcc_glm_us2 # calculate MCC
+accuracy_glm_us2 <- cmatrix_glm_us2$overall['Accuracy']   
+accuracy_glm_us2 # accuracy
+f1_glm_us2 <- cmatrix_glm_us2$byClass['F1']   
+f1_glm_us2 # f1 score
+
+
+```
+
+### Decision trees
+
+```{r dtreeU, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+# Rename response variable levels in both train and test set for clarity
+train_set_sampled$ECMO_Survival <- as.factor(ifelse(train_set_sampled$ECMO_Survival==1, "Survived","Died"))
+test_set_sampled$ECMO_Survival <- as.factor(ifelse(test_set_sampled$ECMO_Survival==1, "Survived", "Died"))
+
+# model fitting: first tree
+set.seed(123)
+first_tree_sampled <- rpart(formula_train, data=train_set_sampled, method="class")
+rpart.plot(first_tree_sampled,type=2,extra=106) # plot tree
+
+printcp(first_tree_sampled) # print cp
+# select cp with mininum xerror
+cp.select(first_tree_sampled)
+
+# set control
+control <- rpart.control(minsplit = 4,
+    minbucket = round(7 / 3),
+    maxdepth = 3)
+
+#tune_fit_sampled <- rpart(formula_train, data = train_set_sampled, method = 'class', cp=cp.select(first_tree_sampled))
+
+# prune tree
+tune_fit_sampled <- prune(first_tree_sampled, cp=cp.select(first_tree_sampled))
+# generate predictions
+tree_prediction_sampled <- predict(first_tree_sampled, newdata=test_set_sampled, type="class")
+
+#Create confusion matrix
+cmatrix_tree_sampled <- confusionMatrix(data=as.factor(tree_prediction_sampled), reference = as.factor(test_set_sampled$ECMO_Survival),dnn = c("Prediction", "Original"))
+
+cmatrix_tree_sampled
+cmatrix_tree_sampled$byClass
+
+mcc_dts <- mcc(as.factor(test_set_sampled$ECMO_Survival), as.factor(tree_prediction_sampled))
+mcc_dts # calculate MCC
+accuracy_dts <- cmatrix_tree_sampled$overall['Accuracy']   
+accuracy_dts # accuracy
+f1_dts <- cmatrix_tree_sampled$byClass['F1']   
+f1_dts # f1 score
+
+# model fitting: using Boruta-selected variables
+set.seed(123)
+boruta_dtree_sampled <- rpart(rf_borota_confirmed, data=train_set_sampled, method="class")
+rpart.plot(boruta_dtree_sampled,type=2,extra=106) # plot tree
+printcp(boruta_dtree_sampled) # print cp
+
+# generate predictions
+tree_prediction_boruta_sampled <- predict(boruta_dtree_sampled, newdata=test_set_sampled, type="class")
+
+#Create confusion matrix
+cmatrix_tree_boruta_sampled <- confusionMatrix(data=as.factor(tree_prediction_boruta_sampled), reference = as.factor(test_set_sampled$ECMO_Survival),
+                           dnn = c("Prediction", "Original"))
+cmatrix_tree_boruta_sampled
+#Display results 
+cmatrix_tree_boruta_sampled$byClass
+
+mcc_bdts <- mcc(as.factor(test_set_sampled$ECMO_Survival), as.factor(tree_prediction_boruta_sampled))
+mcc_bdts # calculate MCC
+accuracy_bdts <- cmatrix_tree_boruta_sampled$overall['Accuracy']   
+accuracy_bdts # accuracy
+f1_bdts <- cmatrix_tree_boruta_sampled$byClass['F1']   
+f1_bdts #f1 score
+
+```
+
+### Random forest
+
+```{r rforestunder, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+# fit random forest using all the variables in the dataset
+set.seed(123)
+rf_train_sampled <-  randomForest(formula_train, data=train_set_sampled, ntree = 500)
+rf_train_sampled
+# generate predictions
+predictions_randomF_sampled <- predict(rf_train_sampled, test_set_sampled, "class")
+predictions_randomF_sampled
+
+#Create confusion matrix
+cmatrix_rf_sampled <- confusionMatrix(data=as.factor(predictions_randomF_sampled), reference = as.factor(test_set_sampled$ECMO_Survival), dnn = c("Prediction", "Original"))
+
+cmatrix_rf_sampled
+cmatrix_rf_sampled$byClass
+
+mcc_rfs <- mcc(as.factor(test_set_sampled$ECMO_Survival), as.factor(predictions_randomF_sampled))
+mcc_rfs # calculate MCC
+accuracy_rfs <- cmatrix_rf_sampled$overall['Accuracy']   
+accuracy_rfs # accuracy
+f1_rfs <- cmatrix_rf_sampled$byClass['F1']   
+f1_rfs # f1 score
+
+# fit random forest using Boruta-selected variables
+set.seed(123)
+rf_confirmed_boruta_sampled <-  randomForest(rf_borota_confirmed, data=train_set_sampled, ntree = 500)
+rf_confirmed_boruta_sampled
+
+# Generate predictions
+predictions_randomF_borutaC_sampled <- predict(rf_confirmed_boruta_sampled, test_set_sampled, "class")
+
+# Create confusion matrix
+cmatrix_rf_cboruta_sampled <- confusionMatrix(predictions_randomF_borutaC_sampled, test_set_sampled$ECMO_Survival)
+
+cmatrix_rf_cboruta_sampled
+cmatrix_rf_cboruta_sampled$byClass
+
+# calculate MCC
+mcc_brfs <- mcc(as.factor(test_set_sampled$ECMO_Survival), as.factor(predictions_randomF_borutaC_sampled))
+mcc_brfs
+accuracy_brfs <- cmatrix_rf_cboruta_sampled$overall['Accuracy']   
+accuracy_brfs # accuracy
+f1_brfs <- cmatrix_rf_cboruta_sampled$byClass['F1']   
+f1_brfs # f1 score
+
+
+```
+
+## Neural network
+
+```{r nns, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+# Create model matrix 
+nn_matrix_sampled <- model.matrix(formula_nn, data=train.data_sampled)[,-1]
+# head(nn_matrix,4)     
+
+# Construct predictor list
+predictor_list_sampled <- paste(colnames(nn_matrix_sampled),collapse="+")
+
+# symbolic description of the model we want to fit
+fs <- paste(c("train.data_sampled$ECMO_Survival~",predictor_list_sampled),collapse="")
+
+
+# convert the variable successful into integer
+train.data_sampled$ECMO_Survival <- ifelse(train.data_sampled$ECMO_Survival == "Survived",1,0)
+valid.data_sampled$ECMO_Survival <- ifelse(valid.data_sampled$ECMO_Survival == 'Survived',1,0)
+test.data_sampled$ECMO_Survival <- ifelse(test.data_sampled$ECMO_Survival == 'Survived',1,0)
+glimpse(train.data_sampled)
+
+# fit model
+set.seed(123)
+nn_first_s <- neuralnet(fs,data=nn_matrix_sampled, hidden=c(5), learningrate=0.01,
+linear.output=FALSE, err.fct='ce', likelihood=TRUE) # one hidden layer five nodes
+pr.nn1s <- compute(nn_first_s, n_valid_predictors_sampled) # generate predictions in validation set
+predictions_test1s <- ifelse(pr.nn1s$net.result<0.5,0,1)
+mcc_nn1s <- mcc(as.factor(valid.data_sampled$ECMO_Survival), as.factor(predictions_test1s)) # calculate MCC
+
+set.seed(123)
+nn_seconds <- neuralnet(fs,data=nn_matrix_sampled, hidden=c(10), learningrate=0.01,
+linear.output=FALSE, err.fct='ce', likelihood=TRUE) # one hidden layer 10 nodes
+pr.nn2s <- compute(nn_seconds, n_valid_predictors_sampled) # generate predictions in validation set
+predictions_test2s <- ifelse(pr.nn2s$net.result<0.5,0,1)
+mcc_nn2s <- mcc(as.factor(valid.data_sampled$ECMO_Survival), as.factor(predictions_test2s)) # calculate MCC
+
+set.seed(123)
+nn_two_layers_1s <- neuralnet(fs,data=nn_matrix_sampled, hidden=c(10,5), learningrate=0.01,
+linear.output=FALSE, err.fct='ce', likelihood=TRUE) # two hidden layers with 10 nodes in first layer and five nodes in second
+pr.nn3s <- compute(nn_two_layers_1s, n_valid_predictors_sampled) # generate predictions in validation set
+predictions_test3s <- ifelse(pr.nn3s$net.result<0.5,0,1) 
+mcc_nn3s <- mcc(as.factor(valid.data_sampled$ECMO_Survival), as.factor(predictions_test3s)) # calculate MCC
+
+set.seed(123)
+nn_two_layers_2s <- neuralnet(fs,data=nn_matrix_sampled, hidden=c(10,75), learningrate=0.01,
+linear.output=FALSE, err.fct='ce', likelihood=TRUE) # two hidden layers with 10 nodes in first layer and 75 nodes in second
+pr.nn4s <- compute(nn_two_layers_2s, n_valid_predictors_sampled) # generate predictions in validation set
+predictions_test4s <- ifelse(pr.nn4s$net.result<0.5,0,1)
+mcc_nn4s <- mcc(as.factor(valid.data_sampled$ECMO_Survival), as.factor(predictions_test4s)) # calculate MCC
+
+# Create a dataframe with neural networks and thir corresponding MCC values
+nn_dfs <- data.frame (network  = c("nn_first", "nn_second", "nn_two_layers_1", "nn_two_layers_2"),
+                  mcc = c(mcc_nn1s, mcc_nn2s, mcc_nn3s, mcc_nn4s))
+nn_dfs
+
+# choose model with highest MCC
+paste("Chosen model:", nn.select(nn_dfs))
+nn_chosens <- get(nn.select(nn_dfs))
+
+# generate predictions using test set
+pr.nns <- compute(nn_chosens, n_test_predictors_sampled)
+predictions_test_sampled <- ifelse(pr.nns$net.result<0.5,0,1) # convert prrobability to binary response
+
+#Create confusion matrix
+cmatrix_nn_sampled <- confusionMatrix(data=as.factor(predictions_test_sampled), reference = as.factor(test.data_sampled$ECMO_Survival),dnn = c("Prediction", "Original"))
+cmatrix_nn_sampled
+cmatrix_nn_sampled$byClass
+
+mcc_nns <-mcc(as.factor(test.data_sampled$ECMO_Survival), as.factor(predictions_test_sampled))
+mcc_nns # calculate MCC
+accuracy_nns <- cmatrix_nn_sampled$overall['Accuracy']   
+accuracy_nns # accuracy
+f1_nns <- cmatrix_nn_sampled$byClass['F1']   
+f1_nns # f1 score
+
+```
+
+## Naive Bayes
+
+```{r nbs, eval=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+# fit model using all the variables in dataset
+set.seed(123)  # Setting Seed
+classifier_cls <- naiveBayes(formula_train, data = train_set_sampled_normalised)
+classifier_cls
+
+# Predicting on test data
+y_preds <- predict(classifier_cls, newdata = test_set_sampled_normalised, type="class")
+
+# Create confusion Matrix
+cms <- table(test_set_sampled_normalised$ECMO_Survival, y_preds)
+cms
+ 
+# Model Evaluation
+cmatrix_nbs <- confusionMatrix(cms)
+cmatrix_nbs
+cmatrix_nbs$byClass
+mcc_nbs <- mcc(as.factor(test_set_sampled_normalised$ECMO_Survival), as.factor(y_preds))
+mcc_nbs # calculate MCC
+accuracy_nbs <- cmatrix_nbs$overall['Accuracy']   
+accuracy_nbs # accuracy
+f1_nbs <- cmatrix_nbs$byClass['F1']   
+f1_nbs # f1 score
+
+# Fit model using variables selected by Lasso
+set.seed(123)  # Setting Seed
+classifier_cls2 <- naiveBayes(sig.formula0, data = train_set_sampled_normalised)
+classifier_cls2
+
+# Predicting on test data
+y_preds2 <- predict(classifier_cls2, newdata = test_set_sampled_normalised, type="class")
+
+# Confusion Matrix
+cms2 <- table(test_set_sampled_normalised$ECMO_Survival, y_preds2)
+cms2
+ 
+# Model Evaluation
+cmatrix_nbs2 <- confusionMatrix(cms2)
+cmatrix_nbs2
+cmatrix_nbs2$byClass
+mcc_nbs2 <- mcc(as.factor(test_set_sampled_normalised$ECMO_Survival), as.factor(y_preds2))
+mcc_nbs2 # calculate MCC
+accuracy_nbs2 <- cmatrix_nbs2$overall['Accuracy']   
+accuracy_nbs2 # accuracy
+f1_nbs2 <- cmatrix_nbs2$byClass['F1']   
+f1_nbs2 # f1 score
+
+```
+
+```{r metricPlots, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+# Plot evaluation metrics values of all the models applied to under-sampled dataset
+
+# Create a dataframe with technique and their metrics
+metric_all_sampled <- tibble(Model = rep(c("GLM", "GLM lasso", "DT", "DT boruta", "RF", "RF boruta", "NN", "NB", "NB lasso"), each = 3),
+Metric = rep(c("MCC", "F1", "Accuracy"), time = 9),
+Value = c(mcc_glm_us, f1_glm_us, accuracy_glm_us, mcc_glm_us2, f1_glm_us2, accuracy_glm_us2,
+          mcc_dts, f1_dts, accuracy_dts, mcc_bdts, f1_bdts, accuracy_bdts,
+          mcc_rfs, f1_rfs, accuracy_rfs, mcc_brfs, f1_brfs, accuracy_brfs,
+          mcc_nns, f1_nns, accuracy_nns, mcc_nbs, f1_nbs, accuracy_nbs, 
+          mcc_nb2, f1_nbs2, accuracy_nbs2))
+metric_all_sampled
+
+# Plot data
+metric_plot_sampled <- metric_all_sampled %>%
+ggplot(aes(Model, Value, fill = Metric)) +
+geom_col(position = "dodge")
+metric_plot_sampled
+
+# ggsave(
+#   "metricplot2.png",
+#   plot = last_plot(),
+#   device = "png",
+#   path = "~/Downloads",
+#   scale = 0.5,
+#   width = 40,
+#   height = 15,
+#   units = "cm",
+#   dpi = 600,
+#   limitsize = TRUE,
+#   bg = NULL
+# )
+```
+
+# Supplimentary
+## Variable importance
+
+```{r rfvs, echo=TRUE, eval=TRUE, warning=FALSE, message=FALSE}
+# variable importance using random forest
+
+# load packages
+library(varImp)
+library(caret)
+# Fit Random Forest model
+set.seed(123)
+importance_model <- randomForest(formula_train, data = preECMO, importance=TRUE) 
+
+#Conditional=True, adjusts for correlations between predictors.
+# ls(importance_model)
+i_score <- randomForest::importance(importance_model)
+i_score
+varImpPlot(importance_model, sort = TRUE,  main = "Title", pch=16 ) # plot importance
+
+# library(xtable)
+# print(xtable(i_score, type = "latex"), file = "importanceRF.tex") # latex table
+
+```
+
+
+
